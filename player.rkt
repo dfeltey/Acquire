@@ -1,35 +1,55 @@
-#lang racket
+#lang typed/racket
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; Acquire player that manages all the interactions; delegates decision making to separate strategies 
 
 (require "player-intf.rkt")
-
 (player& player? create)
-(player-extra& testx xaction? action->xexpr)
-
+(provide xaction? action->xexpr)
 ;; ---------------------------------------------------------------------------------------------------
 ;; IMPLEMENTATION 
 
-(require "admin.rkt" "basics.rkt" "board.rkt" "strategy.rkt" (prefix-in i: "state.rkt") "Lib/xml.rkt")
-
-(module+ test 
+(require "admin.rkt" "strategy.rkt" (except-in "Lib/xml.rkt" numbered-attributes))
+(require/typed "Lib/xml.rkt"
+               [numbered-attributes (String (Hotel -> String) (Listof Any) -> (Listof (List Symbol String)))])
+(require (except-in "typed-wrapper.rkt"
+                    player?
+                    state-shares
+                    state-sub-shares
+                    *create-state
+                    *create-player
+                    player-name
+                    player-shares
+                    state-players))
+(require (prefix-in i: (only-in "typed-wrapper.rkt"
+                                state-shares
+                                state-sub-shares
+                                *create-state
+                                *create-player
+                                player-name
+                                state-players
+                                player-shares)))
+#;(module+ test 
   (require rackunit (submod "board.rkt" tiles+spots)))
 
+(: player? (Any -> Boolean))
 (define (player? x)
   (is-a? x player%))
 
+(: create (String Strategy -> (Instance Player%)))
 (define (create n c)
   (new player% [name n][choice c]))
 
+(: player% Player%)
 (define player%
   (class object%
     (init-field name choice)
     (super-new)
-    
-    (field [*players '()]
-           [*bad '()])
-    
+    (: *players (Listof Player))
+    (define *players '())
+    (: *bad (Listof Player))
+    (define *bad '())
+    (: *my-game-name String)
     (define *my-game-name "")
     
     (define/public (go administrator)
@@ -42,7 +62,7 @@
       (bad-players (get-field players turn))
       ;; reconcile is added for remote players that don't get complete information 
       (define-values (to-place hotel shares-to-buy) (choice (reconcile turn)))
-      (values to-place hotel shares-to-buy))
+      (values to-place hotel (assert shares-to-buy shares-order?)))
     
     (define/public (keep hotels)
       (map (lambda (h) (< (random 100) 50)) hotels))
@@ -57,20 +77,20 @@
       ;; I should figure out what to do here 
       (void))
     
-    ;; [Listof Players] -> Void
     ;; given the list of current players, find out which ones dropped out since the last update
     ;; effect: move the drop-out players to this.*bad, keep the good ones in this.*players
+    (: bad-players ((Listof Player) -> Void))
     (define/private (bad-players players)
       (set! *bad 
-            (for/fold ((bad *bad)) ((old-player *players)) 
+            (for/fold: : (Listof Player) ((bad : (Listof Player) *bad)) ((old-player : Player *players)) 
               (define n (i:player-name old-player))
-              (if (findf (lambda (current) (string=? (i:player-name current) n)) players) 
+              (if (findf (lambda: ([current : Player]) (string=? (i:player-name current) n)) players) 
                   bad
                   (cons old-player bad))))
       (set! *players players))
     
-    ;; Turn -> Turn 
-    ;; effect: reduce the turn's banker-shares by the shares of this.*bad players 
+    ;; effect: reduce the turn's banker-shares by the shares of this.*bad players
+    (: reconcile ((Instance Turn-Player%) -> (Instance Turn-Player%)))
     (define/private (reconcile turn)
       (define bad-shares (*combine-shares (map i:player-shares *bad)))
       (send turn reconcile-shares bad-shares)
@@ -78,7 +98,7 @@
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; externalizing actions 
-
+(: xaction? (String -> Boolean))
 (define xaction?
   (xml-predicate 
    (action ())
@@ -90,36 +110,44 @@
    (action ((hotel1 string->hotel) (hotel2 string->hotel)))
    (action ((hotel1 string->hotel) (hotel2 string->hotel) (hotel3 string->hotel)))))
 
-;; Xexpr -> Boolean 
 ;; does the given xpexression represent a tile placement? 
+(: xplace? (String -> Boolean))
 (define xplace?
   (xml-predicate 
    (place ((column string->column) (row string->row) (hotel string->hotel)))
    (place ((column string->column) (row string->row)))))
 
+(: action->xexpr ((Option Tile) (Option Hotel) Shares-Order -> Any))
 (define (action->xexpr placement hotel shares-to-buy)
-  (define attributes (numbered-attributes "hotel~a" hotel->label shares-to-buy))
+  (define attributes (numbered-attributes "hotel~a" hotel->label (assert shares-to-buy list?)))
   (cond
     [(not placement) `(action (,@attributes))]
     [else 
-     (define spot (second (tile->xexpr placement)))
+     (define spot (second (assert (tile->xexpr placement) list?)))
      (define hotl (if hotel `((hotel ,(hotel->label hotel))) '()))
-     `(action (,@attributes) (place (,@spot ,@hotl)))]))
+     `(action (,@attributes) (place (,@(assert spot list?) ,@hotl)))]))
 
-;; ---------------------------------------------------------------------------------------------------
-;; Strategy Board Money Tiles Shares [Board Player -> [Tile [Listof Shares] -> Any]] -> Any 
-(define (testx S board money tiles available-shares available-hotels checker)
+;; -------------------------------------------ayer -> [Tile [Listof Shares] -> Any]] -> Any 
+;; (: testx (Strategy Board Cash (Listof Tile) Shares (Listof Hotel) (Board (Instance Player%) -> (Tile (Listof Shares) -> Any)) -> Any))
+#;(define (testx S board money tiles available-shares available-hotels checker)
   (define p (create "a" S))
   (define ip (i:*create-player "a" money player-shares0 tiles))
   (call-with-values 
    (lambda () (send p take-turn (create-test-turn board ip available-shares available-hotels)))
    (checker board p)))
 
+(: create-test-turn (Board Player Shares (Listof Hotel) -> (Instance Test-Turn%)))
 (define (create-test-turn board ip available-shares available-hotels)
   (define c0 (i:*create-state board (list ip)))
   (define c1 (i:state-sub-shares c0 (shares-minus banker-shares0 available-shares)))
   (new test-turn% [current-state c1][available-hotels available-hotels]))
 
+(define-type Test-Turn%
+  (Class #:implements Turn-Player%
+         (init-field [available-hotels (Listof Hotel)]
+                     [current-state State])))
+
+(: test-turn% Test-Turn%)
 (define test-turn%
   (class turn% 
     (init-field available-hotels)
@@ -133,11 +161,10 @@
       (set! current-state (i:state-sub-shares current-state t))
       (set! shares (i:state-shares current-state))
       t)))
-
 ;; ---------------------------------------------------------------------------------------------------
 ;; testing 
 
-(module+ test 
+#;(module+ test 
   
   ;; Strategy Board Cash [Listof Tile] Shares [Listof Hotel] [Maybe Tile] [Maybe Hotel] Shares -> Any 
   (define (test S board0 cash t* available-shares available-hotels e-placement e-hotel e-shares)
@@ -302,4 +329,3 @@
   (test-reconcile p pa pb (send p setup (i:state0 pb pa)) random-s)
   (test-reconcile p pa pb (send p inform (i:state0 pb pa)) random-s)
   )
-

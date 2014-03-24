@@ -82,9 +82,7 @@
                (syntax-case stx ()
                  [(name all-ids ...) 
                   #`(provide ids-without-contracts ...
-                             #,@(if with-contracts 
-                                    #'((contract-out (ids-that-came-with-contracts their-contracts) ...))
-                                    #'(ids-that-came-with-contracts ...)))])))))]))
+                             ids-that-came-with-contracts ...)])))))]))
 
 ; (interface tst& (foo (-> integer? integer?)))
 ; (tst& add1)

@@ -1,7 +1,8 @@
 #lang racket
 
 (provide
- (contract-out 
+ log
+ #;(contract-out 
   (log (-> (list/c any/c any/c) any/c any))))
 
 ;; [List X (U String Exn S-expr)] String -> Void 

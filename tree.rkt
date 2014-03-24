@@ -1,4 +1,4 @@
-#lang racket
+#lang typed/racket
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; provides an abstract type Tree: generation plus inspection from admin and player perspective
@@ -6,19 +6,19 @@
 ;; ---------------------------------------------------------------------------------------------------
 ;; INTERFACE
 
-(require "tree-intf.rkt" unstable/contract)
+(require "tree-intf.rkt" #;unstable/contract) 
 
 (tree& 
  tree? decision-tree? generate-tree
  tree-state tree-next
  tree-founding tree-merging)
 
+(provide ATree% LPlaced% Decisions State%)
+
 ;; ---------------------------------------------------------------------------------------------------
 ;; IMPLEMENTATION
-
-(require "board.rkt" "state.rkt" "basics.rkt" "Lib/auxiliaries.rkt")
-
-(module+ test (require rackunit (submod "board.rkt" tiles+spots)))
+(require "typed-wrapper.rkt")
+(define-type Policies (Listof Shares-Order))
 
 ;; from board: 
 ;; ACTION = {MERGING, FOUNDING, SINGELTON, GROWING, IMPOSSIBLE}
@@ -94,38 +94,40 @@ HandOut:
 ;; does the player keep the specified hotel? Absence means yes
 
 |#
-
-(struct hand-out (tile tree))
+(struct: hand-out ([tile : Tile] [tree : (Instance ATree%)]))
+(define-type HandOut hand-out)
 ;; HandOut = (hand-out t st)
 ;; denotes that player received tile t and st is the Tree generated from the resulting state
 
+(define-type Tree<%>
+  (Class 
+   [to-state (-> State)]
+   [next (Tile (Option Hotel) (Listof (List Player (Listof (List Hotel Boolean)))) Shares-Order ((Listof Tile) -> Tile) -> (Values (Option Tile) (Instance ATree%)))]
+   [founding (Natural Policies -> Natural)] 
+   [merging (Natural Policies -> Natural)]))
 
-(define tree<%> 
-  (interface () 
-    ;; map THIS tree to a game state
-    to-state ;; -> State
-    
-    ;; navigate from THIS tree to the next tree
-    ;; given tile placement, optional hotel, and shares to buy plus a way to select the hand out tile
-    next ;; Tile [Maybe Hotel] [Listof Hotel] [ [Listof Tile] -> Tile ] ->* Tile Tree
-    
-    ;; how many founding transitions are in THIS tree up to depth n
-    founding ;; Nat [Listof ShareOrder] -> Nat
-    
-    ;; how many merging transitions are in THIS tree up to depth n
-    merging ;; Nat [Listof ShareOrder] -> Nat 
-    ))
+(define-type ATree%
+  (Class #:implements Tree<%>
+         (init-field [state State])
+         [traversal (Natural Policies ((Instance Placed%) -> Natural) -> Natural)]
+         [lookup-tile  (((Listof Tile) -> Tile) (Listof HandOut) -> (Values (Option Tile) (Instance ATree%)))]))
 
+(define-type State%
+  (Class #:implements ATree%
+         #:implements Tree<%>
+         (init-field [state State])))
+  
+(: atree% ATree%)
 (define atree% 
-  (class* object% (tree<%>)
+  (class object% 
     (init-field state)
     
     (super-new)
     
-    (define/public (to-state) 
+    (define/public (to-state)  
       state)
     
-    (abstract next)
+    (define/public (next a b c d e) (error "abstract method"))
     
     ;; template hook pattern: template
     (define/public (founding n order-policies)
@@ -137,20 +139,20 @@ HandOut:
     
     ;; hook
     ;; how many transitions in THIS tree (up to depth n) satisfy the given predicate 
-    ;; Nat [Listof ShareOrder] [Placed -> Nat] -> Nat   
-    (abstract traversal)
+    (define/public (traversal a b c) (error "abstract method"))
     
-    ;; private field: ACTION -> Placed -> {0,1}
-    ;; is the alternative a merging action? 
-    (define ((is-action tag) p)
-      (if (and (placed-hotel p) (eq? (get-field reason p) tag)) 1 0))
+    ;; is the alternative a merging action?
+    (: is-action (Symbol -> ((Instance Placed%) -> Natural)))
+    (define (is-action tag) (lambda: ([p : (Instance Placed%)])
+      (if (and (placed-hotel p) (eq? (get-field reason p) tag)) 1 0)))
     
     ;; use pick-tile to hand out a tile; extract the corresponding subtree 
-    ;; [[Listof Tile] -> Tile] [Listof HandOut] ->* [Maybe Tile] Tree 
-    (abstract lookup-tile)))
+    (define/public (lookup-tile a b) (error "abstract method"))
+    ))
 
+(: state% State%)
 (define state% 
-  (class* atree% (tree<%>)
+  (class atree%
     (super-new)
     
     (define/override (next . _) 
@@ -161,56 +163,82 @@ HandOut:
     (define/override (lookup-tile pick-tile lo-handout)
       (values #f this))))
 
+(define-type LPlaced%
+  (Class #:implements ATree%
+         #:implements Tree<%>
+         #:implements State%
+         (init-field  [lplaced (Listof (Instance Placed%))]
+                      [state State])))
+
+(: lplaced% LPlaced%)  
 (define lplaced%
-  (class* atree% (tree<%>)
+  (class atree% 
     (super-new)
     (init-field lplaced)
     
     (define/override (next tile hotel decisions shares-to-buy pick-tile) 
       (define intermediate (send (lookup-purchase tile hotel) purchase decisions shares-to-buy))
-      (send this lookup-tile pick-tile intermediate))
+      (send this lookup-tile pick-tile (assert intermediate list?)))
     
-    ;; Tile [Maybe Hotel] -> Placed 
     ;; lookup the one and only Placed from lo-placed that represents the action of placing t (& h)
+    (: lookup-purchase (Tile (Option Hotel) -> (Instance Placed%)))
     (define/private (lookup-purchase t h)
-      (for/first ((p lplaced) #:when (and (equal? (placed-hotel p) h) (equal? (placed-tile p) t)))
-        p))
+      (let ([lst (filter (lambda: ([p : (Instance Placed%)]) (and (equal? (placed-hotel p) h) (equal? (placed-tile p) t)))
+                         lplaced)])
+        (assert (and (not (empty? lst))
+             (first lst)))))
     
     (define/override (lookup-tile pick-tile lo-hand-out)
       (define tile (pick-tile (map hand-out-tile lo-hand-out)))
-      (define st (for/first ((p lo-hand-out) #:when (equal? (hand-out-tile p) tile)) (hand-out-tree p)))
-      (values tile st))
+      (define st 
+        (let: loop : (Option (Instance ATree%)) ([p : (Listof HandOut) lo-hand-out])
+          (cond
+            [(equal? (hand-out-tile (first p)) tile) (hand-out-tree (first p))]
+            [(empty? p) #f]
+            [else (loop (rest p))])))
+      (values tile (assert st)))
     
     (define/override (traversal n policies p?)
       (if (= n 0)
           0
-          (for/sum ((branch lplaced))
-            (define d* (map (lambda (p) (list p '())) (state-players (get-field state/tile branch))))
+          (for/sum: : Natural ((branch lplaced))
+            (define d* (map (lambda: ([p : Player]) (list p '())) (state-players (get-field state/tile branch))))
             (define a (send branch acceptable-policies policies))
             (+ (p? branch)
                ;; do not inspect every subtree because share buying does not affect actions
                (if (empty? a)
                    0
                    (* (length a) 
-                      (for/sum ((st (send branch to-trees d* (first a))))
+                      (for/sum: : Natural ((st (send branch to-trees d* (first a))))
                         (send st traversal (- n 1) policies p?))))))))))
-
+(define-type Decisions (Listof (List Player (Listof (List Hotel Boolean)))))
+(define-type Placed%
+  (Class 
+   (init-field [state State]
+               [tile Tile]
+               [hotel (Option Hotel)]
+               [state/tile State]
+               [reason Symbol])
+   [purchase (Decisions Shares-Order -> (U (Listof HandOut) (Instance State%)))]
+   [to-trees (Decisions Shares-Order -> (Listof (Instance ATree%)))]
+   [acceptable-policies ((Listof Shares-Order) -> (Listof Shares-Order))]))
+ 
+(: placed% Placed%)
 (define placed%
   (class object%
     (init-field state tile hotel state/tile reason)
     (super-new)
     
-    ;; Decisions ShareOrder -> state% or [Listof HandOut]
     ;; given merger decisions and a purchase order, generate the next stage from THIS decision point
     (define/public (purchase decisions share-order)
       ;; ---------------------------------------------------------------------------------------------
       ;; contract checking 
       (when (eq? MERGING reason)
         (define players (state-players state/tile))
-        (unless (= (length decisions) (length players))
+        (unless (= (length (assert decisions list?)) (length players))
           (printf "contract failure: received wrong number of decisions")
           (pretty-print players)
-          (pretty-print (map first decisions))
+          (pretty-print ((inst map Player (List Player (Listof (List Hotel Boolean)))) first decisions))
           (error 'purchase "done")))
       ;; ---------------------------------------------------------------------------------------------
       (define state/decisions 
@@ -221,41 +249,41 @@ HandOut:
       (define available-tiles (state-tiles state/bought))
       (if (empty? available-tiles) 
           (new state% [state state/bought])
-          (for/list ((tile available-tiles))
+          (for/list: : (Listof HandOut) ((tile available-tiles))
             (hand-out tile (generate-tree (state-next-turn (state-move-tile state/bought tile)))))))
     
-    ;; Decisions ShareOrder -> [Listof Tree]
     ;; given a purchase order, generate list of trees from THIS decision point's purchases 
     (define/public (to-trees decisions share-order)
       (define state-or-hand-out (purchase decisions share-order))
       (cond
-        [(cons? state-or-hand-out) (map hand-out-tree state-or-hand-out)]
-        [else state-or-hand-out]))
+        [(cons? state-or-hand-out) ((inst map (Instance ATree%) HandOut) hand-out-tree (assert state-or-hand-out list?))]
+        [else (assert state-or-hand-out list?)]))
     
-    ;; [Listof ShareOrder] -> [Listof ShareOrder]
     ;; filter out those share orders that are acceptable given THIS decision point's state 
     (define/public (acceptable-policies policies)
       (define state state/tile)
       (define budget (player-money (state-current-player state)))
       (define board  (state-board state))
       (define shares (state-shares state))
-      (for/list ((p policies) 
+      (for/list: : (Listof Shares-Order) ((p policies) 
                  #:when (and (shares-available? shares p) (affordable? board p budget)))
         p))))
 
+(: placed-tile ((Instance Placed%) -> Tile))
+(: placed-hotel ((Instance Placed%) -> (Option Hotel)))
 (define (placed-tile p) (get-field tile p))
 (define (placed-hotel p) (get-field hotel p))
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; tree generation 
-
+(: generate-tree (State -> (Instance State%)))
 (define (generate-tree state)
   (cond
     [(state-final? state) (new state% [state state])]
     [else (define board (state-board state))
           (define available-hotels (state-hotels state))
           (define lplaced
-            (for/fold ((lo-placed '())) ((t (player-tiles (state-current-player state))))
+            (for/fold: : (Listof (Instance Placed%)) ((lo-placed : (Listof (Instance Placed%)) '())) ((t (player-tiles (state-current-player state))))
               (define kind (what-kind-of-spot board t))
               (define hotels 
                 (cond
@@ -266,14 +294,14 @@ HandOut:
                    acquirers]
                   [else (list #f)]))
               (define new-placements
-                (for/list ((h hotels))
+                (for/list: : (Listof (Instance Placed%)) ((h hotels))
                   (define state/tile 
                     (if h (state-place-tile state t h) (state-place-tile state t)))
-                  (new placed% [state state][tile t][hotel h][state/tile state/tile][reason kind])))
+                  (new placed% [state state][tile t][hotel h] [state/tile state/tile][reason kind])))
               (append new-placements lo-placed)))
           (new lplaced% (state state) (lplaced lplaced))]))
 
-(module+ test 
+#;(module+ test 
   
   (define (make-decisions players)
     (map (lambda (p) (list p '())) players))
@@ -360,19 +388,23 @@ HandOut:
 ;; tree navigation: game administrator side 
 
 ;; ASSUME: current player has enough money to buy the desired shares 
+(: tree-next ((Instance State%) Tile (Option Hotel) (Listof (List Player (Listof (List Hotel Boolean)))) Shares-Order ((Listof Tile) -> Tile) -> (Values (Option Tile) (U (Instance State%) (Instance LPlaced%)))))
 (define (tree-next current-tree tile hotel decisions shares-to-buy pick-tile)
   (send current-tree next tile hotel decisions shares-to-buy pick-tile))
 
+(: tree? (Any -> Boolean))
 (define (tree? x)
   (or (is-a? x state%) (is-a? x lplaced%)))
 
+(: decision-tree? (Any -> Boolean))
 (define (decision-tree? x)
-  (and (is-a? x lplaced%) (cons? (get-field lplaced x))))
+  (and (is-a? x lplaced%) (cons? (get-field lplaced (cast x (Instance LPlaced%))))))
 
+(: tree-state ((U (Instance State%) (Instance LPlaced%)) -> State))
 (define (tree-state t)
   (send t to-state))
 
-(module+ test
+#;(module+ test
   (define (smallest-tile lot)
     ;; for speeding up tests; exploit local knowledge 
     (first lot)
@@ -423,7 +455,7 @@ HandOut:
   (let ()
     (define shares-for-am-tw-ww 
       (list (*create-shares AMERICAN 3) (*create-shares TOWER 3) (*create-shares WORLDWIDE 3)))
-    (define player-can-place-d3 
+    (define player-can-place-d3  
       (list (*create-player "a" 1000 (*combine-shares shares-for-am-tw-ww) (list D3))))
     (define state-merge-at-d3 
       (*create-state board-3way-merger-at-d3 player-can-place-d3))
@@ -437,14 +469,14 @@ HandOut:
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; tree navigation: player side 
-
+(: tree-founding ((U (Instance State%) (Instance LPlaced%)) Natural Policies -> Natural))
 (define (tree-founding current-tree n order-policies)
   (send current-tree founding n order-policies))
-
+(: tree-merging ((U (Instance State%) (Instance LPlaced%)) Natural Policies -> Natural))
 (define (tree-merging current-tree n order-policies)
   (send current-tree merging n order-policies))
 
-(module+ test
+#;(module+ test
   (define policy ;; [Listof ShareOrder]
     `((,AMERICAN ,AMERICAN)
       (,TOWER ,TOWER )))
